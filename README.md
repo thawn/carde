@@ -12,7 +12,7 @@ On a polished sample, carbides can be observed using a scanning electron microsc
    git clone https://github.com/thawn/carde 
    cd carde
    ```
-2. download and extract the data as described in `data/README.md`
+2. download and extract the data as described in [data/README.md](data/README.md)
 3. create a virtual environment (using python 3.11 or above), and install the dependencies
    ```bash
    python -m venv venv
@@ -29,11 +29,11 @@ On a polished sample, carbides can be observed using a scanning electron microsc
 
 Open the notebooks and execute all cells sequentially to reproduce the results:
 
-- `docs/notebooks/run__unet_experiments.ipynb`
+- [docs/notebooks/run__unet_experiments.ipynb](docs/notebooks/run__unet_experiments.ipynb)
   Generates segmentation results and plots the figures shown in the manuscript.
 
-- `docs/notebooks/uncertainty_estimation.ipynb`
+- [docs/notebooks/uncertainty_estimation.ipynb](docs/notebooks/uncertainty_estimation.ipynb)
   Reproduces unertainty estimation via temperature scaing.
 
-- `docs/notebooks/hyperparameter_optimization.ipynb`
+- [docs/notebooks/hyperparameter_optimization.ipynb](docs/notebooks/hyperparameter_optimization.ipynb)
   Reproduces hyperparameter optimization experiments.
