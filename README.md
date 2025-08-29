@@ -10,7 +10,7 @@ On a polished sample, carbides can be observed using a scanning electron microsc
 1. clone the repository
    ```bash
    git clone https://github.com/thawn/carde 
-   cd carde
+   cd carbide_detection
    ```
 2. download and extract the data as described in [data/README.md](data/README.md)
 3. create a virtual environment (using python 3.11 or above), and install the dependencies
