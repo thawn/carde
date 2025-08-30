@@ -28,6 +28,7 @@ dependencies = [
     "natsort",
     "click",
     "torch",
+    "torchvision",
     "pytorch-lightning",
     "tensorboard",
     "ipywidgets",
