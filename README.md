@@ -22,7 +22,7 @@ On a polished sample, carbides can be observed using a scanning electron microsc
    ```
    in case you would like to reproduce the hyperparameter optimization or run the unit tests, install the optional `dev` dependencies
    ```bash
-   uv pip install -e .[dev]
+   uv pip install -e ".[dev]"
    ```
 
 ## Reproducing the Paper Results
