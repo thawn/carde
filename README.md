@@ -33,7 +33,7 @@ These instructions are adapted for https://anonymous.4open.science they will be 
 
 Open the notebooks and execute all cells sequentially to reproduce the results:
 
-- [docs/notebooks/run__unet_experiments.ipynb](docs/notebooks/run__unet_experiments.ipynb)
+- [docs/notebooks/run_unet_experiments.ipynb](docs/notebooks/run_unet_experiments.ipynb)
   Generates segmentation results and plots the figures shown in the manuscript.
 
 - [docs/notebooks/uncertainty_estimation.ipynb](docs/notebooks/uncertainty_estimation.ipynb)
