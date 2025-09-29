@@ -7,14 +7,11 @@ On a polished sample, carbides can be observed using a scanning electron microsc
 
 ## Installation
 
-These instructions are adapted for https://anonymous.4open.science they will be different for the code released on github
 
-1. download the repository and unpack it
+1. Clone the repository
    ```bash
-   mkdir carbide_detection
-   cd carbide_detection
-   curl -o carbide_detection.zip https://anonymous.4open.science/api/repo/carbide_detection/zip
-   unzip carbide_detection.zip
+   git clone https://github.com/thawn/carde.git
+   cd carde
    ```
 2. download and extract the data as described in [data/README.md](data/README.md)
 3. create a virtual environment (using python 3.11 or above), and install the dependencies
@@ -22,11 +19,11 @@ These instructions are adapted for https://anonymous.4open.science they will be 
    python -m venv venv
    source venv/bin/activate
    pip install uv
-   SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CARDE=0.0.1 uv pip install -e .
+   uv pip install -e .
    ```
    in case you would like to reproduce the hyperparameter optimization or run the unit tests, install the optional `dev` dependencies
    ```bash
-   SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CARDE=0.0.1 uv pip install -e ".[dev]"
+   uv pip install -e ".[dev]"
    ```
 
 ## Reproducing the Paper Results
