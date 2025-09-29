@@ -1,5 +1,7 @@
 # Automated carbide detection
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17228178.svg)](https://doi.org/10.5281/zenodo.17228178)
+
 Tool to detect carbides in scanning electron micrographs of steel.
 
 During the production and heat treatment of steel, carbides with a size ranging between 10 nm up to a few µm precipitate in the steel matrix. While the carbides contribute to the steels yield strength, the largest carbides can be responsible for crack initiation leading to brittle fracture. Thus, a detailed quantitative description of carbides (e.g. number density, size distribution etc.) in a steel is of great interest.
