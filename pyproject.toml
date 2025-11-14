@@ -55,7 +55,7 @@ include = ["carde*"]
 namespaces = true
 
 [project.optional-dependencies]
-dev = ["pytest", "optuna", "plotly"]
+dev = ["pytest", "optuna", "plotly[kaleido]"]
 
 [tool.pytest.ini_options]
 markers = [
