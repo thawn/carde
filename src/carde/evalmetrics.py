@@ -5,6 +5,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 import random
 
+from carde.image_processing import segment_combined
+from carde.unet import SegmentationModel, dataloader_to_labels
+
 # figure parameters
 plt.rcParams["svg.fonttype"] = "none"  # editable text in svg vector formats
 plt.rcParams["font.size"] = 8
@@ -19,10 +22,113 @@ onecolumn = 3.42  # inches
 # set the default figure size to one column width
 plt.rcParams["figure.figsize"] = (textwidth, onecolumn)
 
-### compute validation metrics and display predictions ###
+
+def plot_loss(event_acc, axs: list[plt.Axes], yscale="linear"):
+    """
+    Plot training and validation loss and score curves from TensorBoard event data.
+
+    This function extracts loss and score metrics from a TensorBoard EventAccumulator
+    and plots them on the provided axes. It displays training loss, validation loss,
+    and validation score (Dice-Sørensen coefficient) across training steps.
+
+    Parameters
+    ----------
+    event_acc : EventAccumulator
+        TensorBoard EventAccumulator object containing logged metrics with keys
+        "train_loss_epoch", "validation_loss", and "validation_score".
+    axs : list[plt.Axes]
+        List of matplotlib Axes objects. Must contain at least 2 axes:
+        - axs[0]: Used for plotting training and validation loss curves
+        - axs[1]: Used for plotting validation score curve
+    yscale : str, optional
+        Scale for the y-axis of the loss plot. Can be "linear" or "log".
+        Default is "linear".
+
+    Returns
+    -------
+    list[plt.Axes]
+        The modified list of axes with plotted data.
+
+    Notes
+    -----
+    - The function safely handles missing data by checking if arrays are non-empty
+      before plotting.
+    - The validation score is expected to be the Dice-Sørensen coefficient, with
+      values between 0 and 1.
+    - Loss curves are plotted on axs[0] with configurable y-axis scale.
+    - Validation score is plotted on axs[1] with a fixed y-axis range [0, 1].
+    """
+
+    # extract training/validation curves
+    train_loss_scalars = event_acc.Scalars("train_loss_epoch")
+    val_loss_scalars = event_acc.Scalars("validation_loss")
+    val_score_scalars = event_acc.Scalars("validation_score")
+
+    # convert to numpy arrays [step, value]
+    train_loss = np.array([[s.step, s.value] for s in train_loss_scalars])
+    val_loss = np.array([[s.step, s.value] for s in val_loss_scalars])
+    val_score = np.array([[s.step, s.value] for s in val_score_scalars])
+
+    if train_loss.size:
+        axs[0].plot(train_loss[:, 0], train_loss[:, 1], label="train loss")
+    if val_loss.size:
+        axs[0].plot(val_loss[:, 0], val_loss[:, 1], label="validation loss")
+
+    axs[0].set_xlabel("step")
+    axs[0].set_ylabel("loss")
+    axs[0].set_yscale(yscale)
+    axs[0].legend()
+
+    if val_score.size:
+        axs[1].plot(val_score[:, 0], val_score[:, 1], label="validation score", color="C1")
+        axs[1].set_xlabel("step")
+        axs[1].set_ylabel("Dice-Sørensen\ncoefficient")
+        axs[1].set_ylim(0, 1)
+        # move ylabel to the right
+        # axs[1].yaxis.set_label_position("right")
+        # axs[1].yaxis.tick_right()
+        axs[1].legend()
+
+    return axs
 
 
 def evaluate_model(model, dataloader, trainer, show_sample=True, n_samples=3):
+    """
+    Evaluate a PyTorch Lightning model on a test dataset and optionally visualize predictions.
+
+    This function computes test metrics (Dice loss and score) and can display sample predictions
+    alongside their corresponding inputs and ground truth labels.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        A PyTorch Lightning model to be evaluated.
+    dataloader : torch.utils.data.DataLoader
+        DataLoader containing the test dataset. Expected to yield batches of
+        (inputs, labels) where inputs have shape (batch_size, 2, H, W) for SE2 and InLens
+        channels, and labels have shape (batch_size, 1, H, W).
+    trainer : pytorch_lightning.Trainer
+        PyTorch Lightning Trainer instance used for testing and prediction.
+    show_sample : bool, optional
+        Whether to display visualization of sample predictions. Default is True.
+    n_samples : int, optional
+        Number of random samples to visualize when show_sample is True. Default is 3.
+
+    Returns
+    -------
+    avg_loss : float
+        Average Dice loss across the test dataset.
+    avg_score : float
+        Average Dice score (1 - Dice loss) across the test dataset.
+
+    Notes
+    -----
+    - The function expects the model to output probability predictions that are thresholded
+      at 0.5 to create binary masks.
+    - Visualization displays 4 columns: SE2 input, InLens input, ground truth label, and
+      predicted mask.
+    - Requires matplotlib to be imported as plt and random module to be available.
+    """
     test_result = trainer.test(model, dataloader)
     avg_loss = test_result[0]["test_loss"]
     avg_score = test_result[0]["test_score"]
@@ -103,7 +209,7 @@ def show_tiles(tiled_image_path, tiled_label_path, tile_id, n_samples=3):
         plt.show()
 
 
-def compute_nll(model, val_loader, temperature=None, device_name="cuda"):
+def compute_nll(logits, labels):
     """
     Computes the average Negative Log-Likelihood (BCE with logits)
     for the model on the validation set.
@@ -124,50 +230,20 @@ def compute_nll(model, val_loader, temperature=None, device_name="cuda"):
     avg_nll : float
         Average BCEWithLogitsLoss over the validation set.
     """
-
-    device = torch.device(device_name)
-    model = model.to(device)
-    model.eval()
-
-    loss_fn = torch.nn.BCEWithLogitsLoss(reduction="sum")
-    total_loss = 0.0
-    total_pixels = 0
-
-    with torch.no_grad():
-        for images, masks in val_loader:
-            images = images.to(device)
-            masks = masks.to(device).float()
-            if masks.ndim == 3:
-                masks = masks.unsqueeze(1)
-
-            logits = model(images)
-
-            if temperature is not None:
-                logits = logits / temperature
-
-            loss = loss_fn(logits, masks)
-            total_loss += loss.item()
-            total_pixels += torch.numel(masks)
-
-    avg_nll = total_loss / total_pixels
+    avg_nll = torch.nn.BCEWithLogitsLoss(reduction="mean")(logits, labels).item()
     return avg_nll
 
 
-def compute_ece(model, data_loader, temperature=None, n_bins=30, device_name="cuda"):
+def compute_ece(probabilities, labels, n_bins=30):
     """
     Computes Expected Calibration Error (ECE).
 
     Parameters:
     -----------
-    model : torch.nn.Module
-        Trained model that outputs logits.
-
-    data_loader : torch.utils.data.DataLoader
-        Dataloader with (images, masks).
-
-    temperature : float or None
-        If provided, logits will be divided by temperature before sigmoid.
-
+    probabilities : torch.Tensor
+        Model probabilities.
+    labels : torch.Tensor
+        True binary labels.
     n_bins : int
         Number of bins for ECE calculation.
 
@@ -176,84 +252,54 @@ def compute_ece(model, data_loader, temperature=None, n_bins=30, device_name="cu
     ece : float
         Expected Calibration Error.
     """
-
-    device = torch.device(device_name)
-    model.eval().to(device)
-
-    all_probs = []
-    all_labels = []
-
-    with torch.no_grad():
-        for images, masks in data_loader:
-            images = images.to(device)
-            masks = masks.to(device).float()
-            if masks.ndim == 3:
-                masks = masks.unsqueeze(1)
-
-            logits = model(images)
-
-            if temperature is not None:
-                logits = logits / temperature
-
-            probs = torch.sigmoid(logits)
-
-            all_probs.append(probs.cpu().flatten())
-            all_labels.append(masks.cpu().flatten())
-
-    probs = torch.cat(all_probs)
-    labels = torch.cat(all_labels)
-
     # Bin boundaries
-    bin_boundaries = torch.linspace(0, 1, steps=n_bins + 1)
-    ece = torch.zeros(1)
+    bin_boundaries = torch.linspace(0, 1, steps=n_bins + 1).to(probabilities.device)
+    ece = torch.zeros(1).to(probabilities.device)
+    probabilities = probabilities.flatten()
+    labels = labels.flatten()
 
     for i in range(n_bins):
         lower = bin_boundaries[i]
         upper = bin_boundaries[i + 1]
 
         # Get indices for the bin
-        mask = (probs > lower) & (probs <= upper)
+        mask = (probabilities > lower) & (probabilities <= upper)
         bin_size = mask.sum().item()
 
         if bin_size > 0:
-            bin_confidence = probs[mask].mean()
+            bin_confidence = probabilities[mask].mean()
             bin_accuracy = labels[mask].mean()
-            ece += (bin_size / len(probs)) * torch.abs(bin_confidence - bin_accuracy)
+            ece += (bin_size / len(probabilities)) * torch.abs(bin_confidence - bin_accuracy)
 
     return ece.item()
 
 
 def compute_reliability_curve(
-    logits: torch.Tensor, labels: torch.Tensor, temperature: Optional[torch.Tensor] = None, n_bins=15
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    probs: torch.Tensor, labels: torch.Tensor, n_bins: int = 15
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Computes bin centers, accuracies, and confidences for a reliability diagram.
+    Computes accuracies, and confidences for a reliability diagram.
 
     Parameters:
     -----------
-        logits : tporch.Tensor
-            Model logits.
+        probs : torch.Tensor
+            Model probabilities.
         labels : torch.Tensor
             True binary labels.
-        temperature : float or None
-            Temperature for scaling logits. If None, no scaling is applied
+        n_bins : int
+            Number of bins for the histogram.
 
     Returns:
     --------
-        bin_centers : torch.Tensor
         accuracies : torch.Tensor
         confidences : torch.Tensor
     """
-    logits, labels = prepare_logits_and_labels(logits, labels, temperature)
-
-    probs = torch.sigmoid(logits)
-
-    bin_edges = torch.linspace(0, 1, n_bins + 1).to(logits.device)
+    bin_edges = torch.linspace(0, 1, n_bins + 1).to(probs.device)
     bin_indices = torch.bucketize(probs, bin_edges, right=True)
 
-    accuracies = torch.zeros(n_bins).to(logits.device)
-    confidences = torch.zeros(n_bins).to(logits.device)
-    bin_counts = torch.zeros(n_bins).to(logits.device)
+    accuracies = torch.zeros(n_bins).to(probs.device)
+    confidences = torch.zeros(n_bins).to(probs.device)
+    bin_counts = torch.zeros(n_bins).to(probs.device)
 
     for i in range(1, n_bins + 1):
         mask = bin_indices == i
@@ -265,115 +311,107 @@ def compute_reliability_curve(
             accuracies[i - 1] = bin_acc
             bin_counts[i - 1] = bin_count
 
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    return bin_centers, accuracies, confidences
+    return accuracies, confidences
 
 
-def plot_reliability_diagram(logits: torch.Tensor, labels: torch.Tensor, temperature: torch.Tensor, ax=None):
+def plot_reliability_diagram(
+    prob_list: list[torch.Tensor], labels: torch.Tensor, legend_labels: list, ax=None
+) -> plt.Axes:
     """
-    Plots reliability diagram before and after calibration.
+    Plots a reliability diagram for model calibration.
+
+    Parameters
+    ----------
+        prob_list : list[torch.Tensor]
+            List of model probabilities to plot.
+        labels : torch.Tensor
+            True binary labels.
+        legend_labels : list
+            List of labels for the legend corresponding to each probability tensor.
+        ax : matplotlib.axes.Axes, optional
+            The axes on which to draw the reliability diagram. If None, a new figure and axes
+            will be created.
+
+    Returns
+    -------
+        ax : matplotlib.axes.Axes
+            The axes containing the reliability diagram.
     """
+
     if ax is None:
-        plt.figure(figsize=(6, 6))
+        plt.figure(figsize=(onecolumn, onecolumn))
         ax = plt.gca()
-
-    # Uncalibrated
-    bin_centers, acc_uncal, conf_uncal = compute_reliability_curve(logits, labels, temperature=None)
-    ax.plot(conf_uncal.cpu(), acc_uncal.cpu(), label="uncalibrated")
-
-    # Calibrated
-    bin_centers, acc_cal, conf_cal = compute_reliability_curve(logits, labels, temperature=temperature)
-    ax.plot(conf_cal.cpu(), acc_cal.cpu(), label="calibrated")
 
     # Perfect calibration line
     ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="perfect calibration")
+
+    for n, prob in enumerate(prob_list):
+        accuracies, confidences = compute_reliability_curve(prob, labels)
+        ax.plot(confidences.cpu(), accuracies.cpu(), label=legend_labels[n])
 
     ax.set_xlabel("confidence")
     ax.set_ylabel("accuracy")
     ax.set_title("reliability diagram")
     ax.legend()
     ax.grid(True)
+    return ax
 
 
-def logits_to_confidence_map(logits, optimal_T, device="cuda"):
+def classical_segmentation(inputs: torch.Tensor) -> np.ndarray:
     """
-    Convert model logits to a calibrated confidence map with multiple certainty levels.
+    Perform classical segmentation on SE2 and InLens images.
 
-    This function applies temperature scaling to logits and creates a multi-level
-    confidence map with the following values:
-    - 0: Very low confidence (prob ≤ 0.025)
-    - 1: Low confidence (0.025 < prob ≤ 0.5)
-    - 2: Medium confidence (0.5 < prob ≤ 0.975)
-    - 3: High confidence (prob > 0.975)
+    This function combines SE2 and InLens images using a simple thresholding
+    technique to segment carbide regions.
 
     Parameters:
-    ----------
-    logits : torch.Tensor
-        Raw logits from the model, before sigmoid activation
-    optimal_T : torch.Tensor
-        Optimal temperature value for calibration (scalar)
-    device : str, default="cuda"
-        Device to perform calculations on ("cuda" or "cpu")
+    -----------
+        inputs : torch.Tensor
+            Tensor of shape (2, H, W) containing SE2 and InLens images.
 
     Returns:
-    -------
-    torch.Tensor
-        Tensor of same shape as input with uint8 values (0-3) representing confidence levels
+    --------
+        segmented : np.ndarray
+            Binary numpy array of shape (H, W) with segmented carbide regions.
     """
-    calibrated_probs = torch.sigmoid(logits.to(device) / optimal_T.to(device))
+    se2_image = inputs[0].cpu().numpy()
+    inlens_image = inputs[1].cpu().numpy()
 
+    segmented = segment_combined(se2_image, inlens_image)
+
+    return torch.tensor(segmented > 0, dtype=torch.float32)
+
+
+def probs_to_confidence_map(probs: torch.Tensor) -> torch.Tensor:
+    """
+    Convert probability values to a confidence map with discrete levels.
+
+    This function transforms continuous probability values into a discrete confidence map
+    with four levels (0-3) based on predefined probability thresholds.
+
+    Args:
+        probs (torch.Tensor): Input tensor containing probability values, typically in the range [0, 1].
+
+    Returns:
+        torch.Tensor: A tensor of the same shape as `probs` with dtype uint8, where:
+            - 0: probability <= 0.025 (very low confidence)
+            - 1: 0.025 < probability <= 0.5 (low confidence)
+            - 2: 0.5 < probability <= 0.975 (high confidence)
+            - 3: probability > 0.975 (very high confidence)
+
+    Note:
+        The thresholds are applied sequentially, so higher probability values override
+        lower confidence levels in the output tensor.
+    """
     # Create the multi-level output array
-    output = torch.zeros_like(calibrated_probs, dtype=torch.uint8)
-    output[calibrated_probs > 0.025] = 1
-    output[calibrated_probs > 0.5] = 2
-    output[calibrated_probs > 0.975] = 3
+    output = torch.zeros_like(probs, dtype=torch.uint8)
+    output[probs > 0.025] = 1
+    output[probs > 0.5] = 2
+    output[probs > 0.975] = 3
     return output
 
 
-def plot_confidence_map(model, trainer, dataloader, optimal_T, device="cuda", ax=None, fig=None, color_bar=True):
-    """
-    Generates and displays a confidence map based on model predictions.
-
-    This function runs inference using the provided model and trainer on the dataloader,
-    converts the logits to a confidence map using an optimal threshold, and visualizes the result.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        The trained model to use for prediction.
-    trainer : pytorch_lightning.Trainer
-        The trainer object to use for inference.
-    dataloader : torch.utils.data.DataLoader
-        The dataloader containing the input data.
-    optimal_T : float
-        The optimal threshold value to use for generating the confidence map.
-    device : str, optional
-        The device to use for computation (default is "cuda").
-    ax : matplotlib.axes.Axes, optional
-        The axes on which to plot the confidence map. If None, a new figure and axes are created.
-    fig : matplotlib.figure.Figure, optional
-        The figure to use for plotting. If None, a new figure is created.
-    color_bar : bool, optional
-        Whether to display a color bar with the plot (default is True).
-
-    Returns
-    -------
-    None
-        The function displays the confidence map but does not return any value.
-    """
-
-    logits = trainer.predict(model, dataloader)[0]
-    output = logits_to_confidence_map(logits, optimal_T, device=device)
-    # Select the first probability map and move to CPU
-    output = output[0, 0].cpu().numpy()
-
-    # Plot the result
-    if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=(onecolumn, onecolumn))
-    plot_as_confidence_map(output, ax, fig, color_bar=color_bar)
-
-
-def plot_as_confidence_map(map, ax, fig, color_bar=True):
+def plot_confidence_map(map, ax, fig, color_bar=True):
     """
     Plots a confidence map with 4 discrete bins using a viridis colormap.
 
@@ -417,95 +455,131 @@ def plot_as_confidence_map(map, ax, fig, color_bar=True):
         cbar.ax.set_yticklabels(["< 2.5%", "> 2.5%", "> 50%", "> 97.5%"])
 
 
-def prepare_logits_and_labels(logits, labels, temperature):
+def baseline_and_model_scores(
+    test_data_loader: torch.utils.data.DataLoader, model: SegmentationModel, device_name="cuda"
+) -> tuple[float, float]:
     """
-    Prepares logits and labels for evaluation metrics computation.
+    Computes baseline Dice loss and score by predicting all zeros.
 
     Parameters:
     -----------
-    logits : list of torch.Tensor
-        List of model output logits for each batch in the validation set.
-    labels : list of torch.Tensor
-        List of target label masks for each batch in the validation set.
-    temperature : float or None
-        If set, logits will be divided by this temperature before loss is computed.
+        test_data_loader : torch.utils.data.DataLoader
+            Dataloader for the test dataset.
+        model : SegmentationModel
+            Trained segmentation model.
+        device_name : str
+            Device to run the computations on.
+    Returns:
+    --------
+        baseline_scores : list[float]
+    """
+    model.to(device_name)
+    baseline_scores = []
+    model_scores = []
+    for inputs, labels in test_data_loader:
+        baseline_pred = []
+        for i in range(inputs.size(0)):
+            pred = classical_segmentation(inputs[i])
+            # add batch dimension and channel dimension
+            baseline_pred.append(pred.unsqueeze(0).unsqueeze(0))
+        baseline_pred = torch.cat(baseline_pred, dim=0)
+        baseline_score_tensor = 1 - model.dice_loss(baseline_pred, labels)
+
+        baseline_scores += [float(item) for item in baseline_score_tensor.ravel()]
+
+        inputs = inputs.to(model.device)
+        labels = labels.to(model.device)
+        with torch.no_grad():
+            logits = model(inputs)
+            probs = torch.sigmoid(logits)
+            model_pred = (probs > 0.5).float()
+            model_score_tensor = 1 - model.dice_loss(model_pred, labels)
+            model_scores += [float(item) for item in model_score_tensor.ravel()]
+
+    return baseline_scores, model_scores
+
+
+## Temperature Scaling Related Functions
+
+
+def logits_to_probs(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+    """
+    Converts logits to probabilities using sigmoid activation,
+    optionally applying temperature scaling.
+
+    Parameters:
+    -----------
+        logits : torch.Tensor
+            Model logits.
+        temperature : float
+            Temperature for scaling logits. Default is no scaling (temperature = 1.0).
 
     Returns:
     --------
-    logits : torch.Tensor
-        temperature scaled logits tensor.
-    labels : torch.Tensor
-        labels tensor on same device as logits.
+        probs : torch.Tensor
+            Sigmoid probabilities.
     """
-    labels = labels.to(logits.device).float()
     if temperature is not None:
-        logits = logits / temperature.to(logits.device)
+        logits /= temperature
+    probs = torch.sigmoid(logits)
+    return probs
 
-    return logits, labels
+
+## MVE Related Functions
 
 
-def compute_nll(logits, labels, temperature=None):
+def predict_logits_mean_sigma(model, dataloader) -> torch.Tensor:
+    output = model.trainer.predict(model, dataloader)
+    logits_list = []
+    sigma_list = []
+    for logits, sigma in output:
+        logits_list.append(logits)
+        sigma_list.append(sigma)
+    logits = torch.cat(logits_list, dim=0)
+    sigma = torch.cat(sigma_list, dim=0)
+    return logits, sigma
+
+
+def logits_mean_sigma_to_probabilities(logits: torch.Tensor, sigma: torch.Tensor, samples=40) -> torch.Tensor:
+    """Convert mean and sigma tensors to a confidence map.
+
+    Parameters
+    ----------
+        logits : torch.Tensor
+            Tensor of shape (B, C, H, W) representing the logits predictions.
+        sigma : torch.Tensor
+            Tensor of shape (B, C, H, W) representing the sigma predictions.
+        samples : int
+            Number of samples to draw for Monte Carlo estimation.
+
+    Returns
+    -------
+        mean probabilities: torch.Tensor
+            Tensor of shape (B, C, H, W) representing the mean probabilities.
     """
-    Computes the average Negative Log-Likelihood (BCE with logits)
-    for the model on the validation set.
+    noise = torch.randn(samples, *logits.shape, device=logits.device)
+    perturbed_logits = logits.unsqueeze(0) + sigma.unsqueeze(0) * noise
+    probs = torch.sigmoid(perturbed_logits)
+    return probs.mean(dim=0)
 
-    Parameters:
-    -----------
-    all_logits : list of torch.Tensor
-        List of model output logits for each batch in the validation set.
-    all_masks : list of torch.Tensor
-        List of target label masks for each batch in the validation set.
-    temperature : float or None
-        If set, logits will be divided by this temperature before loss is computed.
 
-    Returns:
-    --------
-    avg_nll : float
-        Average BCEWithLogitsLoss over the validation set.
+def mve_confidence_map(model, dataloader, samples=40) -> torch.Tensor:
+    """Convert mean and variance predictions from the model to a confidence map.
+
+    Parameters
+    ----------
+        model : torch.nn.Module
+            The trained model to use for prediction.
+        dataloader : torch.utils.data.DataLoader
+            The dataloader containing the input data.
+        samples : int
+            The number of samples to draw for Monte Carlo estimation.
+
+    Returns
+    -------
+        torch.Tensor
+            The confidence map.
     """
-    logits, labels = prepare_logits_and_labels(logits, labels, temperature)
-    return torch.nn.BCEWithLogitsLoss(reduction="mean")(logits, labels).item()
-
-
-def compute_ece(logits: torch.Tensor, labels: torch.Tensor, temperature=None, n_bins=30):
-    """
-    Computes Expected Calibration Error (ECE).
-
-    Parameters:
-    -----------
-    logits : list of torch.Tensor
-        List of predicted probabilities (after sigmoid) for each batch.
-    mask : list of torch.Tensor
-        List of ground truth label masks for each batch.
-    temperature : float or None
-        If provided, logits will be divided by temperature before sigmoid.
-
-    n_bins : int
-        Number of bins for ECE calculation.
-
-    Returns:
-    --------
-    ece : float
-        Expected Calibration Error.
-    """
-    logits, labels = prepare_logits_and_labels(logits, labels, temperature)
-    logits = torch.sigmoid(logits)
-
-    # Bin boundaries
-    bin_boundaries = torch.linspace(0, 1, steps=n_bins + 1)
-    ece = torch.zeros(1).to(logits.device)
-
-    for i in range(n_bins):
-        lower = bin_boundaries[i]
-        upper = bin_boundaries[i + 1]
-
-        # Get indices for the bin
-        mask = (logits > lower) & (logits <= upper)
-        bin_size = mask.sum()
-
-        if bin_size > 0:
-            bin_confidence = logits[mask].mean()
-            bin_accuracy = labels[mask].mean()
-            ece += (bin_size.float() / logits.numel()) * torch.abs(bin_confidence - bin_accuracy)
-
-    return ece.item()
+    logits, sigma = predict_logits_mean_sigma(model, dataloader)
+    mean_probs = logits_mean_sigma_to_probabilities(logits, sigma, samples=samples)
+    return probs_to_confidence_map(mean_probs)
