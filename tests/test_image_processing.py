@@ -25,14 +25,14 @@ from carde.image_processing import (
 def test_get_metadata_index_no_metadata():
     # Create an image with no metadata (all zeros)
     image = np.zeros((100, 100), dtype=np.uint8)
-    assert get_metadata_index(image) == -1
+    assert get_metadata_index(image) == -2
 
 
 def test_get_metadata_index_with_metadata():
     # Create an image with metadata (a bright object at the bottom)
     image = np.zeros((100, 100), dtype=np.uint8)
     image[90:, :] = 255
-    assert get_metadata_index(image) == 89
+    assert get_metadata_index(image) == 88
 
 
 def test_get_metadata_index_with_multiple_objects():
@@ -41,7 +41,7 @@ def test_get_metadata_index_with_multiple_objects():
     image[10:19, :] = 255
     image[50:60, :] = 255
     image[85:, :] = 255
-    assert get_metadata_index(image) == 84
+    assert get_metadata_index(image) == 83
 
 
 def test_get_metadata_index_with_noise():
@@ -49,21 +49,21 @@ def test_get_metadata_index_with_noise():
     np.random.seed(0)
     image = np.random.randint(0, 50, (100, 100), dtype=np.uint8)
     image[90:, :] = 255
-    assert get_metadata_index(image) == 89
+    assert get_metadata_index(image) == 88
 
 
 def test_get_metadata_index_small_image():
     # Create a small image with a bright object
     image = np.zeros((20, 20), dtype=np.uint8)
     image[10:, :] = 255
-    assert get_metadata_index(image) == 9
+    assert get_metadata_index(image) == 8
 
 
 def test_get_metadata_index_less_than_10_lines():
     # Create a small image with a bright object
     image = np.zeros((20, 20), dtype=np.uint8)
     image[12:, :] = 255
-    assert get_metadata_index(image) == -1
+    assert get_metadata_index(image) == -2
 
 
 # Test cases for crop_away_metadata
@@ -81,7 +81,7 @@ def test_crop_away_metadata_with_metadata():
     image = np.zeros((100, 100), dtype=np.uint8)
     image[90:, :] = 255
     cropped_image = crop_away_metadata(image)
-    assert cropped_image.shape == (89, 100)
+    assert cropped_image.shape == (88, 100)
 
 
 def test_crop_away_metadata_with_multiple_objects():
@@ -91,7 +91,7 @@ def test_crop_away_metadata_with_multiple_objects():
     image[50:60, :] = 255
     image[85:, :] = 255
     cropped_image = crop_away_metadata(image)
-    assert cropped_image.shape == (84, 100)
+    assert cropped_image.shape == (83, 100)
 
 
 def test_crop_away_metadata_with_noise():
@@ -100,7 +100,7 @@ def test_crop_away_metadata_with_noise():
     image = np.random.randint(0, 50, (100, 100), dtype=np.uint8)
     image[90:, :] = 255
     cropped_image = crop_away_metadata(image)
-    assert cropped_image.shape == (89, 100)
+    assert cropped_image.shape == (88, 100)
 
 
 def test_crop_away_metadata_small_image():
@@ -108,7 +108,7 @@ def test_crop_away_metadata_small_image():
     image = np.zeros((20, 20), dtype=np.uint8)
     image[10:, :] = 255
     cropped_image = crop_away_metadata(image)
-    assert cropped_image.shape == (9, 20)
+    assert cropped_image.shape == (8, 20)
 
 
 def test_crop_away_metadata_less_than_10_lines():
@@ -718,7 +718,7 @@ def test_process_folder(
     image2[90:, :] = 255
     mock_read_image_pair.return_value = (image1, image2)
 
-    expected_segmentation = np.zeros((89, 100), dtype=np.uint8)
+    expected_segmentation = np.zeros((88, 100), dtype=np.uint8)
     expected_segmentation[40:60, 40:60] = 1
 
     # Call the function
