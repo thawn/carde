@@ -52,7 +52,7 @@ def get_metadata_index(image):
             largest_label_size = label_stats.GetNumberOfPixels(label)
     mask = sitk.BinaryThreshold(mask, largest_label, largest_label, 1, 0)
     mask = sitk.GetArrayFromImage(mask)
-    return min(np.where(mask)[0]) - 1
+    return min(np.where(mask)[0]) - 2
 
 
 def crop_away_metadata(image: np.ndarray, metadata_index: int = None) -> np.ndarray:
@@ -99,7 +99,9 @@ def preprocess_image(image_path: Path) -> np.ndarray:
         # crop off the metadata
         cropped_label_image = crop_away_metadata(imread(label_image_path), metadata_index)
         cropped_label_image = np.bitwise_and(
-            cropped_label_image[:, :, 2] == 255, cropped_label_image[:, :, 1] == 255, cropped_label_image[:, :, 0] == 0
+            cropped_label_image[:, :, 2] == 255,
+            cropped_label_image[:, :, 1] == 255,
+            cropped_label_image[:, :, 0] == 0,
         )
         assert (
             cropped_image.shape == cropped_label_image.shape
@@ -375,7 +377,7 @@ class RobustImageScaler:
     def __init__(self):
         self.scaler = RobustScaler()
 
-    def fit(self, img: np.ndarray):
+    def fit(self, img: np.ndarray, y=None):
         """
         Fit the scaler to the image data.
 
@@ -383,6 +385,10 @@ class RobustImageScaler:
         ----------
         img : np.ndarray
             Input image. Must be (C, H, W).
+            The image data to fit the scaler.
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            sklearn API.
 
         Returns
         -------
@@ -392,6 +398,8 @@ class RobustImageScaler:
         n_channels, h, w = img.shape
         img_reshaped = img.reshape(n_channels, -1).T  # shape (H*W, C)
         self.scaler.fit(img_reshaped)
+
+        return self
 
     def transform(self, img: np.ndarray) -> np.ndarray:
         """
@@ -414,7 +422,7 @@ class RobustImageScaler:
         # return to original shape
         return img_scaled.T.reshape(n_channels, h, w)
 
-    def fit_transform(self, img: np.ndarray) -> np.ndarray:
+    def fit_transform(self, img: np.ndarray, y=None) -> np.ndarray:
         """
         Fit the scaler to the image data and transform it.
 
@@ -422,6 +430,9 @@ class RobustImageScaler:
         ----------
         img : np.ndarray
             Input image. Must be (C, H, W).
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            sklearn API.
 
         Returns
         -------
@@ -429,8 +440,223 @@ class RobustImageScaler:
             Scaled image with the same shape as the input.
         """
 
-        self.fit(img)
-        return self.transform(img)
+        return self.fit(img, y).transform(img)
+
+
+class CompleteImageTiler:
+    """
+    A transformer for tiling images with proper handling of edge cases.
+
+    This class divides images into tiles and can reconstruct the original image from tiles,
+    handling cases where the image dimensions are not perfectly divisible by the stride.
+    Follows the scikit-learn preprocessing API pattern.
+
+    Parameters
+    ----------
+    tile_size : int, default=128
+        Size of the square tiles (height and width in pixels).
+    stride : int, default=128
+        Step size between consecutive tiles.
+    scale : bool, default=True
+        Whether to apply robust scaling to the image during transformation.
+
+    Attributes
+    ----------
+    tile_coords_ : list[tuple[int, int]]
+        List of (row_start, col_start) coordinates for each tile.
+        Set after calling fit().
+    original_shape_ : tuple[int, int, int]
+        Shape of the fitted image (C, H, W).
+        Set after calling fit().
+    """
+
+    def __init__(self, tile_size: int = 128, stride: int = 128):
+        self.tile_size = tile_size
+        self.stride = stride
+        self.tile_coords_ = []
+        self.original_shape_ = None
+        self.original_ndim_ = None
+
+    def _ensure_CWH(self, X: np.ndarray) -> np.ndarray:
+        """
+        Ensure the input image is in (C, H, W) format.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input image. Can be 2D (H, W) or 3D (C, H, W) or (H, W, C).
+
+        Returns
+        -------
+        np.ndarray
+            Image in (C, H, W) format.
+        """
+        self.original_ndim_ = X.ndim
+        # Normalize input shape to (C, H, W)
+        if X.ndim == 2:
+            X = X[np.newaxis, ...]  # [1, H, W]
+        elif X.ndim == 3 and X.shape[0] > 3:
+            warn(
+                "Size of first dimension is greater than 3. If you have more than 3 channels, everything is fine. Otherwise, make sure the input is in (C, H, W) format."
+            )
+        return X  # input shape [C, H, W]
+
+    def fit(self, X: np.ndarray, y=None):
+        """
+        Fit the tiler to the image dimensions.
+
+        Calculates all tile coordinates based on the input image shape.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input image. Can be 2D (H, W) or 3D (C, H, W) or (H, W, C).
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            sklearn API.
+
+        Returns
+        -------
+        self
+            Returns the instance itself.
+        """
+        X = self._ensure_CWH(X)
+
+        self.original_shape_ = X.shape
+        c, h, w = X.shape
+
+        # Make sure tile_size is not larger than image dimensions
+        if self.tile_size > h or self.tile_size > w:
+            raise ValueError(
+                f"tile_size {self.tile_size} is larger than image dimensions "
+                f"({h}, {w}). Make sure the image is in (C, H, W) format and at least as large as the tile size."
+            )
+
+        # Calculate regular grid positions
+        row_positions = list(range(0, h - self.tile_size + 1, self.stride))
+        col_positions = list(range(0, w - self.tile_size + 1, self.stride))
+
+        # Add edge-aligned positions if needed
+        if row_positions[-1] + self.tile_size < h:
+            row_positions.append(h - self.tile_size)
+        if col_positions[-1] + self.tile_size < w:
+            col_positions.append(w - self.tile_size)
+
+        # Generate all coordinate combinations
+        self.tile_coords_ = [(r, c) for r in row_positions for c in col_positions]
+
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """
+        Transform the image into tiles.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input image. Can be 2D (H, W) or 3D (C, H, W) or (H, W, C).
+            Must have the same dimensions as the image used in fit().
+
+        Returns
+        -------
+        np.ndarray
+            Array of tiles with shape (N, C, tile_size, tile_size),
+            where N is the number of tiles.
+        """
+        if not self.tile_coords_:
+            raise ValueError(
+                "This CompleteImageTiler instance is not fitted yet. " "Call 'fit' before using this estimator."
+            )
+
+        X = self._ensure_CWH(X)
+
+        if X.shape != self.original_shape_:
+            raise ValueError(f"X has shape {X.shape} but this tiler was fitted " f"for shape {self.original_shape_}")
+
+        # Extract tiles using the coordinates
+        tiles = []
+        for row_start, col_start in self.tile_coords_:
+            tile = X[
+                :,
+                row_start : row_start + self.tile_size,
+                col_start : col_start + self.tile_size,
+            ]
+            tiles.append(tile)
+
+        return np.array(tiles)
+
+    def fit_transform(self, X: np.ndarray, y=None) -> np.ndarray:
+        """
+        Fit to data, then transform it.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input image. Can be 2D (H, W) or 3D (C, H, W) or (H, W, C).
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            sklearn API.
+
+        Returns
+        -------
+        np.ndarray
+            Array of tiles with shape (N, C, tile_size, tile_size).
+        """
+        return self.fit(X, y).transform(X)
+
+    def inverse_transform(self, X: np.ndarray, handle_overlap: str = "average") -> np.ndarray:
+        """
+        Reconstruct the original image from tiles.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Array of tiles with shape (N, C, tile_size, tile_size).
+        handle_overlap : str, default='average'
+            Method to handle overlapping regions. Options:
+            - 'average': Average overlapping pixels
+            - 'last': Use the last tile's values in overlapping regions
+            - 'first': Use the first tile's values in overlapping regions
+
+        Returns
+        -------
+        np.ndarray
+            Reconstructed image with shape matching the original fitted image.
+        """
+        if self.original_shape_ is None:
+            raise ValueError(
+                "This CompleteImageTiler instance is not fitted yet. " "Call 'fit' before using this estimator."
+            )
+
+        c, h, w = self.original_shape_
+        reconstructed = np.zeros((c, h, w), dtype=X.dtype)
+        weight_map = np.zeros((h, w), dtype=np.float32)
+
+        # Process tiles using stored coordinates
+        for tile_idx, (row_start, col_start) in enumerate(self.tile_coords_):
+            end_row = row_start + self.tile_size
+            end_col = col_start + self.tile_size
+
+            if handle_overlap == "average":
+                reconstructed[:, row_start:end_row, col_start:end_col] += X[tile_idx]
+                weight_map[row_start:end_row, col_start:end_col] += 1
+            elif handle_overlap == "last":
+                reconstructed[:, row_start:end_row, col_start:end_col] = X[tile_idx]
+            elif handle_overlap == "first":
+                # Only fill pixels that haven't been filled yet
+                mask = weight_map[row_start:end_row, col_start:end_col] == 0
+                reconstructed[:, row_start:end_row, col_start:end_col][:, mask] = X[tile_idx][:, mask]
+                weight_map[row_start:end_row, col_start:end_col][mask] = 1
+
+        if handle_overlap == "average":
+            # Normalize by weight map to get average
+            weight_map[weight_map == 0] = 1  # Avoid division by zero
+            reconstructed = reconstructed / weight_map[np.newaxis, :, :]
+
+        if self.original_ndim_ == 2:
+            reconstructed = reconstructed[0]  # Remove channel dimension
+
+        return reconstructed
 
 
 def tile_image(img: np.ndarray, tile_size: int = 128, stride: int = 128, scale=True) -> np.ndarray:
@@ -533,6 +759,8 @@ def save_paired_tiles(
         assert input_tiles.shape[0] == label_tiles.shape[0], "mismatch in number of tiles"
 
         for i in range(input_tiles.shape[0]):
-            torch.save(torch.tensor(input_tiles[i], dtype=torch.float32), tiled_image_path / f"image_{tile_id:05d}.pt")
+            torch.save(
+                torch.tensor(input_tiles[i], dtype=torch.float32), tiled_image_path / f"image_{tile_id:05d}.pt"
+            )
             torch.save(torch.tensor(label_tiles[i], dtype=torch.uint8), tiled_label_path / f"label_{tile_id:05d}.pt")
             tile_id += 1
