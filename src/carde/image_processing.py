@@ -73,7 +73,7 @@ def crop_away_metadata(image: np.ndarray, metadata_index: int = None) -> np.ndar
     """
     if metadata_index is None:
         metadata_index = get_metadata_index(image)
-    if metadata_index == -1:
+    if metadata_index < 0:
         warn("No metadata found in the image. Returning the original image.")
         return image
     return image[:metadata_index, ...]
