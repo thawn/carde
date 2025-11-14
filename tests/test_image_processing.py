@@ -3,17 +3,20 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from carde.image_processing import pixel_size_um
-from carde.image_processing import get_metadata_index
-from carde.image_processing import get_metadata_index, crop_away_metadata
-from carde.image_processing import preprocess_image
-from carde.image_processing import preprocess_images, preprocess_image
-from carde.image_processing import segment_otsu
-from carde.image_processing import combine_images
-from carde.image_processing import segment_combined
-from carde.image_processing import combine_segmentation_with_overlay
-from carde.image_processing import evaluate_segmentation
-from carde.image_processing import process_folder
+from carde.image_processing import (
+    pixel_size_um,
+    get_metadata_index,
+    crop_away_metadata,
+    preprocess_image,
+    preprocess_images,
+    segment_otsu,
+    combine_images,
+    segment_combined,
+    combine_segmentation_with_overlay,
+    evaluate_segmentation,
+    process_folder,
+    CompleteImageTiler,
+)
 
 
 # Test cases for get_metadata_index
@@ -744,3 +747,151 @@ def test_process_folder(
     assert (args[1][90:, :, :] == 254).all()
     args, kwargs = mock_to_csv.call_args_list[0]
     assert args[0] == Path("/mock/output_folder/image_01-02_table.csv")
+
+
+# Test cases for CompleteImageTiler
+
+
+def _test_tiler_reconstruction(image, tile_size, stride, handle_overlap="average"):
+    """
+    Helper function to test tiling and reconstruction.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image to tile and reconstruct.
+    tile_size : int
+        Size of the tiles.
+    stride : int
+        Stride for tiling.
+    handle_overlap : str, optional
+        Method to handle overlapping tiles, by default "average".
+
+    Returns
+    -------
+    tiles : np.ndarray
+        Extracted tiles.
+    reconstructed : np.ndarray
+        Reconstructed image.
+    """
+    tiler = CompleteImageTiler(tile_size=tile_size, stride=stride)
+    tiles = tiler.fit_transform(image)
+    reconstructed = tiler.inverse_transform(tiles, handle_overlap=handle_overlap)
+    np.testing.assert_array_almost_equal(reconstructed, image)
+    return tiles, reconstructed
+
+
+def test_complete_image_tiler_basic():
+    # Create a simple image
+    image = np.random.rand(3, 256, 256).astype(np.float32)
+    tiles, _ = _test_tiler_reconstruction(image, tile_size=128, stride=128)
+
+    # Should produce 4 tiles (2x2 grid)
+    assert tiles.shape == (4, 3, 128, 128)
+
+
+def test_complete_image_tiler_with_overlap():
+    # Create a simple image with overlapping tiles
+    image = np.random.rand(3, 256, 256).astype(np.float32)
+    tiles, _ = _test_tiler_reconstruction(image, tile_size=128, stride=64)
+
+    # With stride=64, we should get more tiles due to overlap
+    assert tiles.shape[0] > 4
+    assert tiles.shape[1:] == (3, 128, 128)
+
+
+def test_complete_image_tiler_non_divisible():
+    # Create an image where dimensions are not divisible by stride
+    image = np.random.rand(3, 300, 300).astype(np.float32)
+    tiles, _ = _test_tiler_reconstruction(image, tile_size=128, stride=128)
+
+    # Should add edge-aligned tiles
+    assert tiles.shape[0] == 9  # 3x3 grid with edge alignment
+    assert tiles.shape[1:] == (3, 128, 128)
+
+    # Check that the tile in the bottom-right corner matches the image edge
+    bottom_right_tile = tiles[-1]
+    np.testing.assert_array_almost_equal(bottom_right_tile, image[:, -128:, -128:])
+
+
+def test_complete_image_tiler_2d_image():
+    # Test with 2D image (should add channel dimension)
+    image = np.random.rand(256, 256).astype(np.float32)
+    tiles, _ = _test_tiler_reconstruction(image, tile_size=128, stride=128)
+
+    assert tiles.shape == (4, 1, 128, 128)
+
+
+def test_complete_image_tiler_hwc_format():
+    # Test with (H, W, C) format
+    image = np.random.rand(256, 256, 3).astype(np.float32)
+    tiler = CompleteImageTiler(tile_size=128, stride=128)
+
+    # Check that a warning is raised for HWC format
+    with pytest.raises(ValueError, match="\(C, H, W\) format"):
+        tiler.fit(image)
+
+
+def test_complete_image_tiler_many_channels():
+    # Test with (H, W, C) format
+    image = np.random.rand(16, 256, 256).astype(np.float32)
+    tiler = CompleteImageTiler(tile_size=128, stride=128)
+
+    # Check that a warning is raised for HWC format
+    with pytest.warns(UserWarning, match="\(C, H, W\) format"):
+        tiler.fit(image)
+
+
+def test_complete_image_tiler_unfitted_error():
+    # Test that error is raised when using unfitted tiler
+    tiler = CompleteImageTiler(tile_size=128, stride=128)
+    image = np.random.rand(3, 256, 256).astype(np.float32)
+
+    with pytest.raises(ValueError, match="not fitted yet"):
+        tiler.transform(image)
+
+    with pytest.raises(ValueError, match="not fitted yet"):
+        tiler.inverse_transform(np.random.rand(4, 3, 128, 128))
+
+
+def test_complete_image_tiler_shape_mismatch():
+    # Test that error is raised when transforming different shape
+    image1 = np.random.rand(3, 256, 256).astype(np.float32)
+    image2 = np.random.rand(3, 512, 512).astype(np.float32)
+
+    tiler = CompleteImageTiler(tile_size=128, stride=128)
+    tiler.fit(image1)
+
+    with pytest.raises(ValueError, match="shape"):
+        tiler.transform(image2)
+
+
+def test_complete_image_tiler_tile_size_too_large():
+    # Test that error is raised when tile_size is larger than image
+    image = np.random.rand(3, 64, 64).astype(np.float32)
+    tiler = CompleteImageTiler(tile_size=128, stride=128)
+
+    with pytest.raises(ValueError, match="tile_size.*is larger"):
+        tiler.fit(image)
+
+
+def test_complete_image_tiler_inverse_overlap_last():
+    # Test inverse transform with 'last' overlap handling
+    image = np.random.rand(3, 256, 256).astype(np.float32)
+    _test_tiler_reconstruction(image, tile_size=128, stride=64, handle_overlap="last")
+
+
+def test_complete_image_tiler_inverse_overlap_first():
+    # Test inverse transform with 'first' overlap handling
+    image = np.random.rand(3, 256, 256).astype(np.float32)
+    _test_tiler_reconstruction(image, tile_size=128, stride=64, handle_overlap="first")
+
+
+def test_complete_image_tiler_small_image():
+    # Test with a small image
+    image = np.random.rand(3, 150, 150).astype(np.float32)
+    tiles, reconstructed = _test_tiler_reconstruction(image, tile_size=128, stride=128)
+
+    assert tiles.shape[0] == 4  # 2x2 with edge alignment
+    assert tiles.shape[1:] == (3, 128, 128)
+    assert reconstructed.shape == image.shape
